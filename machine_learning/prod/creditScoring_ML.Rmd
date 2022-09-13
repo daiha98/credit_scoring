@@ -1,0 +1,516 @@
+---
+title: "Credit Scoring"
+subtitle: 'Machine Learning Step'
+author: "Felipe Daiha Alves"
+date: '`r format(Sys.Date(), "%Y-%m-%d")`'
+output: 
+  html_document: 
+    fig_width: 12
+    fig_height: 6
+    highlight: monochrome
+    number_sections: true
+---
+
+***
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# . **Objetivo**:
+
+Relatório da etapa de *machine learning* contendo fases de modelagem e avaliação de métricas sobre o processo de **Risco de Crédito** em empréstimos bancários.
+
+O conjunto de dados original foi extraído de uma fonte pública e salvo localmente em um *csv* com os dados previamente tratados armazenados em um arquivo comprimido em *gz* com os dados para elaboração do modelo. Para acesso ao dicionário das variáveis, entre em <https://github.com/daiha98/credit_scoring/blob/main/README.md>.
+
+***
+
+# . **Environment & Data Preparation**:
+
+## . **Configurando Ambiente**
+
+```{r env, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Nome dos pacotes
+
+packages <- c('openxlsx', 'dplyr', 'data.table', ## Manipulacao de Dados
+              'ggplot2', 'ggraph', 'igraph', 'knitr', 'kableExtra', ## Visualizacao de Dados
+               'caTools', 'caret', 'randomForest', 'xgboost', 'ROSE',  ## Algoritmos e Ferramentas de ML
+               'mlr', 'DALEX', 'MLmetrics', 'mltools', 'miscTools' ## Avaliacao de resultados dos modelos
+              )
+
+
+# Instalando pacotes (caso ainda nao esteja)
+
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+
+
+# Carregando pacotes
+
+invisible(lapply(packages, library, character.only = TRUE))
+
+
+# Removendo variavel criada previamente
+
+rm(packages, installed_packages)
+
+
+# Configuracoes de visualizacao 
+
+options(digits = 10, scipen = 999)
+
+```
+
+## . **Funções utilizadas**
+
+```{r functions, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Funcoes aplicadas neste markdown
+
+    ## 1 - Configuracao dos parametros em pre-modelos no mlr
+
+    mlrConfig <- function(learner, params){
+      
+      res = mlr::tuneParams(
+        learner = mlr::makeLearner(learner, predict.type = "response"),
+        task = mlr::makeClassifTask(data = train_db_balanced %>%
+                                      dplyr::mutate(BAD = as.factor(BAD)), target = "BAD", positive = "0"),
+        resampling = mlr::makeResampleDesc(method = "RepCV", folds = 5, reps = 3),
+        control = mlr::makeTuneControlGrid(),
+        par.set = params,
+        measures = list(acc, fn, fp, tn, tp),
+        show.info = FALSE)
+              
+      res
+      
+    }
+
+    ## 2 - Visualizar os resultados do mlr
+
+    resView <- function(tuneRes, modelName){
+      
+      opt_df = as.data.frame(tuneRes$opt.path) %>%
+        dplyr::mutate(model = modelName) %>%
+        dplyr::select(model, exec.time, acc.test.mean, fn.test.mean, fp.test.mean, tn.test.mean, tp.test.mean) %>%
+        dplyr::mutate(PPV = (tp.test.mean)/(tp.test.mean + fn.test.mean),
+                      NPV = (tn.test.mean)/(tn.test.mean + fp.test.mean))
+      
+      opt_df
+      
+    }
+
+    ## 3 - table_view
+
+    table_view <- function(tbl, title){
+  
+    # Printando tabela
+    
+    knitr::kable(tbl, caption = paste0("<b> ", title, " <b>"), 
+                 row.names = TRUE, align = 'c', longtable = T, 
+                 table.attr = "style='width:30%;'", format = 'html') %>%
+      kableExtra::kable_styling(full_width = TRUE, position = "center") %>%
+      kableExtra::row_spec(0, bold = TRUE)
+    
+    }
+    
+    ## 4 - confusion_matrix
+      
+    confusion_matrix <- function(obj, dataset){
+      
+      # Fazendo as previsoes em cima de test_db:
+
+      prediction = stats::predict(
+        object = obj, 
+        newdata = dataset %>% dplyr::select(!c(clientId)))
+      
+      
+      # Matriz Confusao do modelo
+      
+      mc_result = table(as.data.frame(dataset)[, "BAD"], 
+                        as.data.frame(prediction)[, 1])
+      
+      caret::confusionMatrix(mc_result)
+      
+    }
+
+```
+
+## . **Carregando dados**
+
+```{r loadData, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Load da base de dados
+
+CreditScoring <- data.table::fread('C:/Users/daiha/OneDrive/Documentos/R/CreditScoring_dfML.gz') 
+
+
+# Visualizacao primaria dos dados
+
+glimpse(CreditScoring)
+
+```
+
+## . **Feature Engineering**
+\
+<p style="text-align: center;">**Seleção de Variáveis**</p>
+\
+A análise exploratória verificou potenciais variáveis que pudessem discriminar bons e maus pagadores. Partindo disso, iremos selecionar as principais características para trabalharmos na etapa de **feature engineering** e futura composição do nosso modelo de ML. Manteremos *clientId* inicialmente para auxiliar no merge futuro de avaliação do modelo, mas obviamente não será aplicado na etapa de treino.
+\
+\
+```{r selectFeatures, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Criando copía do dataset
+
+df_model <- CreditScoring
+
+
+# Escolha das variaveis relevantes e convertendo classes de variaveis para melhor compreensao do algoritmo
+
+df_model <- df_model %>%
+  dplyr::select(clientId, age, agesInResidence, agesInTheJob, bestPaymentDay, personalNetIncome,
+                BAD) %>%
+  dplyr::mutate(BAD = as.factor(BAD))
+
+
+# Dropando base original
+
+rm(CreditScoring)
+
+```
+\
+\
+<p style="text-align: center;">**Novas Features**</p>
+\
+Podemos ainda cruzar variaveis segundo um racional. Por exemplo, multiplicar renda pelos anos trabalhados (*personalNetIncome* x 12 x *agesInTheJob*).
+\
+```{r newFeatures, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Cruzando features e dropando variaveis indesejadas
+
+df_model <- df_model %>%
+  dplyr::mutate(personalLifeIncome = personalNetIncome * 12 * agesInTheJob)
+
+# Print de algumas linhas para verificacao
+
+df_model %>%
+  dplyr::select(clientId, personalLifeIncome) %>%
+  dplyr::slice(1:5)
+
+```
+\
+\
+
+## . **Machine Learning**
+\
+<p style="text-align: center;">**Balanceamento de classes**</p>
+\
+```{r freqTarget}
+
+# Gerando um grafico de frequencia absoluta para verificar o balanceamento das classes:
+
+ggplot2::ggplot(df_model, aes(x = BAD)) +
+  ggplot2::geom_bar(width = 0.5) +
+  ggplot2::labs(title = "Frequency BAD Classes\n", x = 'BAD', y = 'Count') +
+  ggplot2::theme_classic() +
+  ggplot2::geom_text(aes(label = scales::percent((..count..)/sum(..count..)),
+                         y= ((..count..)/sum(..count..))), stat="count",
+                     vjust = -1, colour = "white", size = 5)
+
+
+# Em quantidade absoluta:
+
+table(df_model$BAD)
+
+```
+\
+*Comments*: Há um evidente desbalanceamento das classes da variável resposta. Devemos tratar para melhor generalização do modelo.
+\
+\
+<p style="text-align: center;">**Split de Treino & Teste**</p>
+\
+Dividiremos nossa base em treino e teste para as etapas de modelagem e avaliação dos resultados, respectivamente, e verificamos se está devidamente balanceado as bases conforme as proporções vistas acima.\
+\
+```{r splitTrainTest, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Criando a "semente geradora" e dividindo a Base de Dados em Treino-Teste:
+        
+set.seed(1234)
+        
+# Divide a base de dados aleatoriamente segundo a variavel 'X' em fracoes TRUE (75%) e FALSE (25%).
+        
+split_db = caTools::sample.split(df_model$BAD, SplitRatio = 0.75) 
+        
+    ## Define que os valores TRUE pertencem ao DB treino
+        
+    train_db = base::subset(df_model, split_db == TRUE)
+        
+    ## Define que os valores FALSE pertencem ao DB teste
+        
+    test_db = base::subset(df_model, split_db == FALSE)
+        
+    ## Dropando variaveis indesejadas
+      
+    rm(split_db)
+    
+    
+# Verificando se datasets estao balanceados 
+    
+    ## 1 - Treino
+    
+    table_view(setDT(train_db)[,.N/nrow(train_db),BAD], 
+               title = "Balanceamento no dataset de Treino")
+    
+    ## 2 - Teste
+    
+    table_view(setDT(test_db)[,.N/nrow(test_db),BAD], 
+               title = "Balanceamento no dataset de Teste")
+
+```
+\
+*Comments*: Está balanceado proporcionalmente à base de dados original!\
+\
+\
+<p style="text-align: center;">**Tratando desbalanceamento**</p>
+\
+Para ajustar o desbalanceamento de classes, iremos promover a técnica de geração de dados sintéticos pelo método de **over-undersampling** do pacote *ROSE*. 
+\
+\
+Criarmos demasiadamente dados sintéticos sobre características pouco discriminantes (visto na etapa de análise exploratória) podem confundir o algoritmo com comportamentos irreais dos registros.
+\
+\
+Porém, se apenas reduzirmos a classe majoritária para o total de registros da classe minoritária, iremos simplesmente descartar dados reais que podem ser relevante pra sua interpretação final.
+\
+\
+Portanto, a decisão de utilizar *over-undersampling* em detrimento dos demais métodos foi priorizada.
+\
+```{r ROSE, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Utilizando o recurso de geracao de dados sinteticos para classificacoes binarias de 
+# classes desbalanceadas do pacote 'ROSE'
+
+train_db_balanced = ROSE::ovun.sample(
+  BAD ~ ., 
+  data = train_db %>%
+    dplyr::select(!c(clientId)),
+  seed = 1234, method = "both")$data
+
+
+# Verificando a distribuicao
+
+table_view(table(train_db_balanced$BAD), 
+           title = "Distribuição do Target após Rebalanceamento")
+
+```
+\
+\
+<p style="text-align: center;">**Testando alguns modelos**</p>
+\
+Segundo a composição do nosso dataset e as fracas variáveis discriminatórias visualmente falando, serão testados modelos ensamble do tipo árvores para estudos de algortimos a serem aplicados. Pela análise exploratória, já se espera um modelo com baixas métricas de avaliação.
+\
+\
+Nosso objetivo aqui é construir um modelo conservador, que consiga detectar uma alta taxa de maus pagadores, mas que consiga também predizer acima de 50% dos bons pagadores, para que justifique o trabalho futuro de produtização. Não existe certo ou errado nesses casos, vai de acordo com o modelo de negócio que se quer implementar.
+\
+```{r ensambleModels, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Modelos e parametros iniciais a serem otimizados para posterior analise
+
+    ## 1 - Random Forest
+
+          ### Armazenando numeros para hiperparametros
+
+          nT = 50
+          mTr = floor(sqrt(ncol(train_db_balanced) - 1))
+          nSz = floor(sqrt(nrow(train_db_balanced) - (nrow(train_db_balanced)/5)))
+    
+          ### Utilizando funcao previamente criada para elaboracao das metricas
+          
+          res <- mlrConfig(learner = "classif.randomForest", 
+                           params = ParamHelpers::makeParamSet(
+                             makeDiscreteParam("ntree", values = nT),
+                             makeDiscreteParam("mtry", values = mTr),
+                             makeDiscreteParam("nodesize", values = nSz)))
+          
+          ### Visualizando resultados do tuning
+          
+          opt_RF = resView(tuneRes = res, modelName = 'randFor')
+          
+    ## 2 - XG Boost
+          
+          ### Valores para os parametros
+
+          nR = 50
+          mDp = floor(sqrt(ncol(train_db_balanced) - 1))
+          eta = 0.1
+
+          ### Funcao mlrConfig para retirada das metricas
+          
+          res <- mlrConfig(learner = "classif.xgboost", 
+                           params = ParamHelpers::makeParamSet(
+                             makeDiscreteParam("nrounds", values = nR),
+                             makeDiscreteParam("max_depth", values = mDp),
+                             makeDiscreteParam("eta", values = eta)))
+          
+          ### Visualizando resultados do tuning
+          
+          opt_XG = resView(tuneRes = res, modelName = 'xgBoost')
+          
+          
+# Juntando tudo em um mesmo df e printando na tela
+        
+view <- data.table::rbindlist(list(opt_RF, opt_XG), use.names = TRUE, fill = TRUE)
+
+table_view(view, "Comparativo entre Pré-Modelos")
+
+```
+\
+*Comments*: Os modelos apresentam performances similares. O que podemos parcialmente concluir é que o XgBoost é relativamente mais rápido e apresentou resultados mais próximos de PPV (Positive Predicted Value) & NPV (Negative Predicted Value)
+\
+\
+Nessa fase, foram testados apenas um conjunto de hiperparâmetros, pois queríamos buscar análises superficiais em relação aos algoritmos escolhidos.
+\
+\
+<p style="text-align: center;">**Treinamento XGBoost**</p>
+\
+Com nosso modelo selecionado, partiremos para sua construção. Setamos os argumentos de controle do treinamento e outros parâmetros para a função de treino.
+\
+```{r xgBoost, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Construindo modelo de classificacao
+
+xg_model <- caret::train(BAD ~ .,
+                         data = train_db_balanced,
+                         preProcess = c("scale"),
+                         trControl = caret::trainControl(
+                           method = 'repeatedcv', number = 5, repeats = 2,
+                           search = "grid", allowParallel = TRUE),
+                         metric = "Accuracy", maximize = TRUE,
+                         tuneGrid = expand.grid(
+                           nrounds = nR,
+                           eta = eta,
+                           max_depth = mDp,
+                           gamma = 0,
+                           colsample_bytree = 1,
+                           min_child_weight = 1,
+                           subsample = 1),
+                         method = "xgbTree",
+                         verbose = FALSE,
+                         verbosity = 0)
+
+# Printando output do modelo
+
+print(xg_model)
+
+```
+\
+\
+
+## . **Métricas de Avaliação**
+\
+<p style="text-align: center;">**Escorando datasets**</p>
+\
+Modelo devidamente treinado, parte-se para a escoragem dos conjuntos de dados de treino e teste. Esta etapa é imprescindível para analisar as principais métricas de avaliação dos modelos e identificar possível overfitting na etapa de treinamento do algoritmo.
+\
+```{r trainCm, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Fazendo as previsoes em cima de train_db:
+
+confusion_matrix(obj = xg_model, dataset = train_db)
+
+```
+\
+*Comments*: Nossos resultados na base de treino acompanharam o esperado. Baixas métricas de avaliação dado o fraco poder de discriminação das features.
+\
+\
+Porém, as métricas de PPV e NPV estão equilibradas e acima do limiar objetivo, o que nos satisfaz até o momento.
+\
+\
+Agora, partiremos para a análise no conjunto de teste.
+\
+```{r testCm, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Fazendo as previsoes em cima de test_db:
+
+confusion_matrix(obj = xg_model, dataset = test_db)
+
+```
+\
+*Comments*: Da mesma forma, no conjunto de teste as métricas permaneceram próximas e também com uma Specificidade muito baixa, mostrando uma tendência do algoritmo em classificar Falsos Negativos.
+\
+\
+Dado o que se quer propor, acabou que foi uma das métricas menos prejudicial de ser impactada, visto nosso objetivo conservador nesta régua de concessão de crédito.
+\
+\
+    <p style="text-align: center;">**Feature Importance**</p>
+```{r varImp, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Elaborando plot para analise
+
+ggplot2::ggplot(
+  data = as.data.frame(
+    xgboost::xgb.importance(xg_model$finalModel$feature_names, 
+                            model=xg_model$finalModel)), 
+  aes(x = reorder(Feature, Gain), y = Gain)) +
+  ggplot2::geom_col(fill = '#1E1E1E', colour = '#111111') +
+  ggplot2::coord_flip() + 
+  ggplot2::labs(title = "Feature Importance\n",
+                subtitle = "Ordenado Maior para Menor\n") +
+  ggplot2::xlab(' ') +
+  ggplot2::scale_y_continuous("Importancia (%)", expand = expansion(c(0, 0.1))) +
+  ggplot2::geom_text(aes(
+    label = paste0(round(Gain*100, 0), '%')),
+    hjust = - 0.3,
+    colour = '#111111',
+    fontface = 'bold',
+    size = 5.0) +
+  ggplot2::theme(
+    panel.background = element_rect(fill = "white"),
+    panel.grid.major.y =  element_line(colour = "lightgrey"),
+    panel.grid.major.x =  element_line(colour = "lightgrey"),
+    plot.title = element_text(size = 18, face = "bold"),
+    plot.subtitle = element_text(size = 15.0),
+    panel.border = element_rect(colour = "black", fill = NA, size = 1),
+    axis.text.x = element_text(angle = 0, size = 15.0),
+    axis.text.y = element_text(size = 15.0),
+    axis.title.x = element_text(size = 15.0),
+    axis.title.y = element_text(size = 15.0))
+
+```
+\
+\
+    <p style="text-align: center;">**ROC Curve**</p>
+```{r rocCurve, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Plot da curva
+
+  ## Treino: 
+
+      ROSE::roc.curve(train_db$BAD, 
+                      stats::predict(object = xg_model, newdata = train_db), 
+                      main = "Train Database ROC",
+                      plotit = TRUE)
+
+  ## Teste:
+
+      ROSE::roc.curve(test_db$BAD, 
+                      stats::predict(object = xg_model, newdata = test_db), 
+                      main = "Test Database ROC",
+                      plotit = TRUE)
+
+```
+\
+\
+
+## . **Conclusão**
+\
+O resultado atingido foi um modelo considerado **Conservador**! 
+\
+\
+Como a base de dados é relativamente desbalanceada e os dados fornecidos são, ao meu ver, **insuficientes** para se chegar a um modelo que obtivesse alta precisão e acurácia com equilíbrio nas classes, o modelo de machine learning elaborado foi **mais direcionado a acertar a classe 1**, ou seja, de clientes inadimplentes. Afinal, este cliente é considerado um prejuízo para a instituição financeira. 
+\
+\
+Então no cenário existente, foi mais importante acertar o devedor do que o pagador. 
+\
+\

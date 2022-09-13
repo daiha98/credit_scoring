@@ -1,0 +1,518 @@
+---
+title: "Credit Scoring"
+subtitle: 'Data Analysis Step'
+author: "Felipe Daiha Alves"
+date: '`r format(Sys.Date(), "%Y-%m-%d")`'
+output: 
+  html_document: 
+    fig_width: 12
+    fig_height: 6
+    highlight: monochrome
+    number_sections: true
+---
+
+
+***
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# . **Objetivo**:
+
+
+Relatório da etapa de *data analysis* contendo informações e resultados sobre o processo de **Risco de Crédito** em empréstimos bancários.  
+
+O conjunto de dados original foi extraído de uma fonte pública e salvo localmente em um *csv* para análise. Para acesso ao dicionário das variáveis, entre em <https://github.com/daiha98/credit_scoring/blob/main/README.md>.
+
+
+***
+
+
+# . **Environment & Data Cleaning**:
+
+## . **Configurando Ambiente**
+
+```{r env, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Nome dos pacotes
+
+packages <- c('dplyr', 'tidyr', 'data.table', ## Manipulacao de Dados
+              'ggplot2', 'gridExtra', 'scales', 'ggcorrplot' ## Visualizacao de Dados
+              )
+
+
+# Instalando pacotes (caso ainda nao esteja)
+
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+
+
+# Carregando pacotes
+
+invisible(lapply(packages, library, character.only = TRUE))
+
+
+# Removendo variavel criada previamente
+
+rm(packages, installed_packages)
+
+
+# Configuracoes de visualizacao 
+
+options(digits = 10, scipen = 999)
+
+```
+
+## . **Carregando dados**
+
+```{r loadData, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Load da base de dados
+
+CreditScoring <- data.table::fread('C:/Users/daiha/OneDrive/Desktop/Cursos/Kaggle/CreditScoring.csv', drop = 'V1') 
+
+
+# Visualizacao primaria dos dados
+
+glimpse(CreditScoring)
+
+```
+\
+     <p style="text-align: center;">**Convertendo tipo de variáveis necessárias**</p>
+```{r changeType, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Convertendo classes de forma funcional para determinadas variaveis
+
+CreditScoring <- CreditScoring %>%
+  dplyr::mutate(dplyr::across(c(clientId, shopId, areaCodeResidencialPhone, 
+                                shopRank, professionCode, codeApplicationBooth), 
+                              ~as.character(.x)))
+
+# Verificando alteracoes
+
+lapply(CreditScoring, class)
+
+```
+\
+
+## . **Breve visualização dos Dados**
+
+\
+     <p style="text-align: center;">**Sumário Estatístico**</p>
+```{r summary, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Estatisticas basicas para verificacao de intervalos e inconsistencias
+
+summary(CreditScoring)
+
+```
+\
+     <p style="text-align: center;">**Analisando NAs**</p>
+```{r checkNAs, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Checando NAs na base
+
+sapply(CreditScoring, function(x) sum(is.na(x)))
+
+```
+\
+     <p style="text-align: center;">**Checando Classes**</p>
+```{r checkClasses, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Verificando classes de algumas variaveis
+
+lapply(CreditScoring %>% 
+         dplyr::select(gender, maritalStatus, flagResidencialPhone, 
+                       areaCodeResidencialPhone, bestPaymentDay, shopRank, residenceType, 
+                       flagMothersName, flagFathersName, flagResidenceTown_WorkingTown, 
+                       flagResidenceState_WorkingState, professionCode, 
+                       flagResidencialAddress_PostalAddress, flagOtherCard,
+                       flagMobilePhone, flagContactPhone, codeApplicationBooth, BAD), 
+       table) 
+
+```
+\
+\
+*Comments*: Observando brevemente esse db, alguns destaques para tratamento de valores chamam a atenção:\
+a) Há 3 registros da variavel 'gender' com valores " ".\
+b) Todos os registros de 'numberOfDependents', 'quantityBankingAccounts' e 'codeApplicationBooth' equivalem a 0.\
+c) Todos os registros de 'education' são NA.\
+d) A média do 'melhor dia de pagamento 'bestPaymentDay' converge para o meio do mês.\
+e) Há demasiados registros com valor 0 em 'shopRank'.\
+f) Há uma predominância da classe Y em 'flagMothersName', 'flagFathersName' e 'flagResidenceState_WorkingState'.\
+g) Todos os registros de 'flagOtherCard', 'flagMobilePhone' e 'flagContactPhone' são N.\
+h) O target está desbalanceado! A maioria dos valores são 0.
+\
+\
+Dessa forma, iremos inicialmente tratar a variável *gender* e dropar features que só apresentam uma única classe/valor ou NA em sua totalidade, visto que são irrelevantes para discriminação do target. Ao final, analisaremos a dimensão que restou do dataset.
+\
+```{r dealWithFeatures, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Tratando casos concluidos anteriormente
+
+CreditScoring <- CreditScoring %>%
+  dplyr::mutate(gender = ifelse(gender == "", "O", gender)) %>% 
+        ### Caso gender seja vazio, incluir como classe 'O' de outros
+  dplyr::select(!c(numberOfDependents, quantityBankingAccounts, codeApplicationBooth, education, 
+                   flagOtherCard, flagMobilePhone, flagContactPhone)) ### Retirando colunas indesejadas
+
+# Verificando a dimensao do nosso novo dataset
+
+dim(CreditScoring)
+
+```
+
+## . **Tratamento de Outliers**
+
+
+Ao analisar os dados do sumário estatístico, verificamos que algumas variáveis numéricas apresentam *outliers*. Vamos tratar esses valores individualmente
+\
+\
+     <p style="text-align: center;">**1 - Variável 'Age'**</p>
+```{r ageOutlier, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Filtrando pessoas com idade menor que 18 anos ou maior que 75 anos
+
+ageOut <- CreditScoring %>%
+  dplyr::filter(age < 18 | age > 75)
+
+
+# Printando o quanto essas pessoas representa da totalidade da base
+
+cat(paste0("O número de pessoas com idade inferior a 18 anos é de: ", nrow(ageOut[age<18]), "\n",
+           "Enquanto o número de pessoas maior que 75 anos é de: ", nrow(ageOut[age>75]), "\n",
+           "Totalizando ", nrow(ageOut), "\n\n",
+           "O que representa um percentual de: ", 
+           round(nrow(ageOut)/nrow(CreditScoring), digits = 4) * 100.00, ' %'))
+
+```
+\
+\
+*Comments*: Nesse caso em específico, o tratamento de valores foi feito com base no modelo de negócio. A idade é um fator importante no momento da concessão de crédito (não necessariamente para compor um modelo de ML).
+\
+\
+Dessa forma, pessoas com idade inferior a 18 anos, por dificilmente terem renda própria recorrente em sua maioria, e maiores do que 75 anos, devido ao alto risco de morte durante o decorrer do empréstimo, foram eliminados da base, pois não configura um eventual público de pessoas a serem trabalhadas em uma esteira de crédito.
+\
+\
+    <p style="text-align: center;">**2 - Variável 'monthsInResidence'**</p>
+```{r mIROutlier, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Verificando monthsInResidence superior à idade
+
+mIR_out <- CreditScoring %>%
+  dplyr::mutate(agesInResidence = monthsInResidence/12) %>%
+  dplyr::filter(age < agesInResidence)
+
+
+# Printando o quanto essas pessoas representa da totalidade da base
+
+cat(paste0("O número de pessoas com anos na residência superior a idade é de: ", nrow(mIR_out), "\n\n",
+           "O que representa um percentual de: ", 
+           round(nrow(mIR_out)/nrow(CreditScoring), digits = 4) * 100.00, ' %'))
+
+```
+\
+\
+*Comments*: Podemos verificar que alguns registros mostram que o número de anos na residência é superior a idade da pessoa, o que na prática é impossível de acontecer. Nesses casos, iremos dropar estes registros, pois podem configurar eventuais casos de fraude financeira ou tentativa de obter melhores condições na análise de crédito.
+\
+\
+    <p style="text-align: center;">**3 - Variável 'monthsInTheJob'**</p>
+```{r mITJOutlier, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Verificando registros onde a idade subtraida da quantidade de anos no trabalho (monthsInTheJob/12) seja menor que 16 anos
+
+mITJ_out <- CreditScoring %>%
+  dplyr::mutate(agesInTheJob = monthsInTheJob/12) %>%
+  dplyr::filter(age - agesInTheJob < 16)
+
+
+# Printando o quanto essas pessoas representa da totalidade da base
+
+cat(paste0(
+  "O número de pessoas onde a idade subtraida da quantidade de anos no trabalho seja menor que 16 anos é de: ",
+  nrow(mITJ_out), "\n\n",
+  "O que representa um percentual de: ", 
+  round(nrow(mITJ_out)/nrow(CreditScoring), digits = 4) * 100.00, ' %'))
+
+```
+\
+\
+*Comments*: Assim como em 'monthsInResidence', pode-se analisar que alguns casos apresentam pessoas cujo tempo no trabalho atual apresenta uma diferença muito pequena em relação à idade. O que isso quer dizer? Se analisarmos casos onde uma pessoa tem 25 anos de idade e 18 anos no atual emprego, então a pessoa começou a trabalhar com 7 anos de idade? Isso é praticamente impossível.
+\
+\
+Neste caso, também iremos dropar estes registros, sob a mesma ótica do tempo de vivência em meses na residência atual.
+\
+\
+    <p style="text-align: center;">**4 - Variável 'mateIncome e personalNetIncome'**</p>
+```{r incomeOutlier, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Verificando casos onde rendas sejam superior a 0
+
+    ## 1 - mateIncome
+
+    CreditScoring %>%
+      dplyr::mutate(dataset = 'original',
+                    total = n()) %>%
+      dplyr::group_by(dataset, total) %>%
+      dplyr::summarise(flag_mateIncome = ifelse(mateIncome == 0, 0, 1)) %>%
+      dplyr::ungroup() %>%
+      dplyr::group_by(flag_mateIncome, total) %>%
+      dplyr::summarise(obsMateIncome = n()) %>%
+      dplyr::ungroup() %>%
+      dplyr::mutate(shareMateIncome = paste0(round(obsMateIncome/total, digits = 4) * 100.00, ' %'))
+
+    ## 2 - personalNetIncome
+
+    CreditScoring %>%
+      dplyr::mutate(dataset = 'original',
+                    total = n()) %>%
+      dplyr::group_by(dataset, total) %>%
+      dplyr::summarise(flag_personalNetIncome = ifelse(personalNetIncome == 0, 0, 1)) %>%
+      dplyr::ungroup() %>%
+      dplyr::group_by(flag_personalNetIncome, total) %>%
+      dplyr::summarise(obspersonalNetIncome = n()) %>%
+      dplyr::ungroup() %>%
+      dplyr::mutate(sharePersonalNetIncome = paste0(round(obspersonalNetIncome/total, digits = 4) * 100.00, ' %'))
+
+```
+\
+\
+*Comments*: Para as variáveis de renda, serão consideradas formas diferentes de manipulação. A feature 'mateIncome' será transformada em uma variável binária de existência, enquanto que 'personalNetIncome' será filtrado para casos onde a renda for igual a 0 e tratado pela IQR Rule para valores demasiadamente elevados.
+\
+\
+    <p style="text-align: center;">**Promovendo tratamento proposto**</p>
+```{r dfFinal, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Aplicando filtros na base para etapa de analise exploratoria
+
+CreditScoring <- CreditScoring %>%
+  dplyr::filter(age >= 18 | age <= 75) %>% ## 1 - Tratando Age
+  dplyr::mutate(agesInResidence = monthsInResidence/12) %>%
+  dplyr::filter(age > agesInResidence) %>% ## 2 - Tratando monthsInResidence
+  dplyr::mutate(agesInTheJob = monthsInTheJob/12) %>%
+  dplyr::filter(age - agesInTheJob > 16) %>% ## 3 - Tratando monthsInTheJob
+  dplyr::mutate(flag_mateIncome = as.character(ifelse(mateIncome == 0, 0, 1)), ## 4.1 - Tratando mateIncome
+                personalNetIncome = ifelse(personalNetIncome > quantile(personalNetIncome)[4] + 
+                             1.5 * stats::IQR(personalNetIncome), quantile(personalNetIncome)[4], 
+                             personalNetIncome)) %>% ## 4.2 - Tratando personalNetIncome
+  dplyr::filter(personalNetIncome > 0)
+
+# Verificando dimensao do df final
+
+dim(CreditScoring)
+
+```
+\
+
+## . **Análise Exploratória**
+
+
+Com nossa base de dados relativamente tratada, podemos começar a fase de exploração das informações. Caso identificarmos alguma outra incosistência, realizaremos um novo processo de tratamento e manipulação dos dados.
+\
+\
+Nossa análise será focada exclusivamente na relação das variáveis preditoras com o target, visto que nosso objetivo é prever *BAD*
+\
+\
+  <p style="text-align: center;">**Variáveis Numéricas**</p>
+\
+```{r corrplot, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Grafico de corrplot para analise
+
+ggcorrplot::ggcorrplot(corr = as.data.frame(stats::cor(CreditScoring %>% 
+                                                         dplyr::select(c(BAD, age, agesInResidence, agesInTheJob, 
+                                                                         bestPaymentDay, personalNetIncome)) %>%
+                                                         tidyr:: drop_na()), method = "pearson", 
+                       use = "complete.obs", na.rm = TRUE),  
+                       lab_size = 4, type = "upper", hc.order = TRUE, 
+                       lab = TRUE, legend.title = "\nGrau\n", digits = 1) +
+  ggplot2::labs(title = "Corrplot - Variáveis Numéricas\n") +
+  ggplot2:: theme(plot.title = element_text(size = 18.0, face = "bold"),
+                  legend.text = element_text(size = 15.0),
+                  legend.title = element_text(size = 15.0),
+                  axis.text.x = element_text(size = 15, angle = 90),
+                  axis.text.y = element_text(size = 15),
+                  panel.border = element_rect(colour = "grey", fill = NA, size = 2))
+  
+```
+\
+```{r boxplot, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Grafico de boxplot para analise
+
+ggplot2::ggplot(CreditScoring %>%
+                  dplyr::select(c(BAD, age, agesInResidence, agesInTheJob, 
+                                  bestPaymentDay, personalNetIncome)) %>%
+                  tidyr::pivot_longer(cols = !c(BAD), names_to = "Variables", values_to = "Values"), 
+                aes(x = as.factor(BAD), y = Values)) +
+  geom_boxplot(colour = 'Black') +
+  ggplot2::xlab('BAD') +
+  ggplot2::labs(title = "Boxplot das Variáveis Numéricas",
+                subtitle = "\nSegmentado por Classe de BAD\n") +
+  ggplot2::theme(panel.background = element_rect(fill = "white"), 
+                 panel.grid.major.x = element_line(colour = "grey"),
+                 plot.title = element_text(size = 18.0, face = "bold"),
+                 plot.subtitle = element_text(size = 15.0),
+                 panel.border = element_rect(colour = "black", fill = NA, size = 1),
+                 axis.text.x = element_text(angle = 0, size = 15.0),
+                 axis.text.y = element_text(size = 15.0),
+                 axis.title.x = element_text(size = 15.0),
+                 axis.title.y = element_text(size = 15.0),
+                 strip.text = element_text(size = 15)) +
+  ggplot2::facet_wrap(~ Variables, scales = 'free')
+  
+```
+\
+\
+*Comments*: Visualizando os gráficos obtidos, analisamos alguns comportamentos em relação à BAD:\
+a) Nenhuma variável numérica é relativamente discriminante em relação ao target;\
+b) Há uma fraca tendência de quanto menor a idade/anos na residência/anos no trabalho/renda pessoal, mais o cliente tende a ser 1;\
+c) O melhor dia de pagamento não varia a distribuição, mas apresenta medianas distintas;
+\
+\
+  <p style="text-align: center;">**Variáveis Categóricas**</p>
+\
+```{r funcSharePlot, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Criando funcao para plot do share de cada classe em relacao ao target
+
+sharePlot <- function(vars){
+  
+  plot <- ggplot2::ggplot(CreditScoring %>%
+                  dplyr::select(c(vars, 'BAD')) %>%
+                  tidyr::pivot_longer(cols = !c(BAD), names_to = "Variables", values_to = "Values") %>%
+                  dplyr::count(BAD, Variables, Values) %>%
+                  dplyr::group_by(Variables, Values) %>% 
+                  dplyr::mutate(prop = n/sum(n)),
+                aes(x = as.factor(BAD), y = prop)) +
+  ggplot2::geom_col(color = 'black') + 
+  ggplot2::scale_y_continuous(labels = scales::percent, n.breaks = 5) +
+  ggplot2::xlab('Classes') +
+  ggplot2::ylab('Porcentagem do Total') +
+  ggplot2::labs(title = "Barplot - Variáveis Categóricas",
+                subtitle = "\nSegmentado por Feature e por classe\n") +
+  ggplot2::theme(panel.background = element_rect(fill = "white"), 
+                 panel.grid.major.x = element_line(colour = "grey"),
+                 plot.title = element_text(size = 14.0, face = "bold"),
+                 plot.subtitle = element_text(size = 10.0),
+                 panel.border = element_rect(colour = "black", fill = NA, size = 1),
+                 axis.text.x = element_text(angle = 0, size = 10.0),
+                 axis.text.y = element_text(size = 8.0),
+                 axis.title.x = element_text(size = 10.0),
+                 axis.title.y = element_text(size = 10.0),
+                 strip.text = element_text(size = 8)) +
+  ggplot2::facet_wrap(~ Variables+Values, scales = 'free')
+  
+  plot
+  
+}
+  
+```
+```{r groundPercVarChars, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Criando plot para diferentes conjuntos de vetores
+
+    ## 1 - Flags de Residencial
+
+sharePlot(c('flagResidencialPhone', 'flagResidenceTown_WorkingTown', 
+            'flagResidenceState_WorkingState', 'flagResidencialAddress_PostalAddress'))
+
+    ## 2 - Flags de Name
+
+sharePlot(c('flagMothersName', 'flagFathersName'))
+
+    ## 3 - Classes de gender e shopRank
+
+sharePlot(c('gender', 'shopRank'))
+
+    ## 4 - Classes de maritalStatus & residenceType
+
+sharePlot(c('maritalStatus', 'residenceType'))
+  
+```
+\
+```{r funcSharePlot2, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Criando outra funcao para plot do share. Agora, poderemos personalizar segundo o percentual da classe na base toda.
+
+sharePlot2 <- function(var, p = 0.02){
+  
+  plot <- ggplot2::ggplot(CreditScoring %>% 
+                            dplyr::select(c(var, 'BAD')) %>%
+                            dplyr::inner_join(CreditScoring %>%
+                                                dplyr::select(var) %>%
+                                                dplyr::count(dplyr::across(1)) %>%
+                                                dplyr::mutate(prop = n/sum(n)) %>%
+                                                dplyr::filter(prop > p) %>%
+                                                dplyr::select(var),
+                                              by = var) %>%
+                            tidyr::pivot_longer(cols = !c(BAD), names_to = "Variables", values_to = "Values") %>%
+                            dplyr::count(BAD, Variables, Values) %>%
+                            dplyr::group_by(Values) %>%
+                            dplyr::mutate(prop = n/sum(n)),
+                          aes(x = as.factor(BAD), y = prop)) +
+    ggplot2::geom_col(color = 'black') +
+    ggplot2::scale_y_continuous(labels = scales::percent, n.breaks = 5) +
+    ggplot2::xlab('Classes') +
+    ggplot2::ylab('Porcentagem do Total') +
+    ggplot2::labs(title = "Barplot - Variáveis Categóricas",
+                  subtitle = paste0("\nSegmentado por Classe de " , var, "\n")) +
+    ggplot2::theme(panel.background = element_rect(fill = "white"),
+                   panel.grid.major.x = element_line(colour = "grey"),
+                   plot.title = element_text(size = 18.0, face = "bold"),
+                   plot.subtitle = element_text(size = 15.0),
+                   panel.border = element_rect(colour = "black", fill = NA, size = 1),
+                   axis.text.x = element_text(angle = 0, size = 15.0),
+                   axis.text.y = element_text(size = 12.0),
+                   axis.title.x = element_text(size = 15.0),
+                   axis.title.y = element_text(size = 15.0),
+                   strip.text = element_text(size = 10)) +
+    ggplot2::facet_wrap(~ Variables+Values, scales = 'free')
+  
+  plot
+  
+}
+  
+```
+```{r phone&profession, echo=TRUE, message=FALSE, warning=FALSE}
+
+# # Analisando classes mais frequentes nas variaveis areaCodeResidencialPhone & professionCode (Classe deve ser ao menos 2% da populacao total)
+
+sharePlot2(var = 'areaCodeResidencialPhone', p = 0.02)
+sharePlot2(var = 'professionCode', p = 0.02)
+
+
+```
+\
+\
+*Comments*: O gráfico de barras gerado nos permite visualizar que:\
+a) Nenhuma variável categória é relativamente discriminante em relação ao target;\
+b) Algumas flags como 'flagFathersName', 'flagMothersName', 'flagResidencialPhone' mostram quando o cliente cadastra na plataforma tende a ser mais 0.\
+c) Apesar de gênero diferenciar, não podemos utilizar essa variável para análise de crédito, pois é anti-ético.\
+d) O estado civíl 'S' e 'O' tende a ser mais inadimplente do que as demais classes.\
+e) E algumas features não mostram evidentes diferenciações como 'flagResidenceState_WorkingState', 'flagResidenceTown_WorkingTown', 'flagResidencialAddress_PostalAddress', 'residenceType'.\
+f) A variável 'shopRank' para a classe 2 aparenta ter poder de discriminação, mas a volumetria acaba sendo muito baixa para abrangir a população como um todo.\
+g) Alguns 'areaCodeResidencialPhone' como 31 e 50 mostram fraca tendência a ser 1.\
+h) Classes de profissão como '13' e '514' são mais propícios a serem 0, enquanto as profissões '950' e '26' tendem a ser mais 1.
+\
+\
+
+## . **Salvando base para modelo**
+
+```{r rmAll, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Salvando dado para estudo futuro
+
+data.table::fwrite(
+  x = CreditScoring, 
+  file = 'C:/Users/daiha/OneDrive/Documentos/R/CreditScoring_dfML.gz', 
+  compress = 'gzip')
+
+# Limpando workspace
+
+rm(list = ls())
+
+```
