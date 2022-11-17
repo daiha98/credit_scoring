@@ -1,3 +1,4 @@
 *.R  linguist-detectable
 *.Rmd  linguist-detectable
 *.html linguist-detectable=false
+machine_learning/tests/post.py linguist-detectable=true
